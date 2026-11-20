@@ -253,6 +253,287 @@ dialog{border:1px solid #d6e7f2;border-radius:24px;padding:0;width:min(510px,cal
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)sync();});
   setInterval(()=>{if(!document.hidden&&navigator.onLine&&!sending)sync();},20000);
   window.addEventListener('beforeunload',e=>{if(sending){e.preventDefault();e.returnValue='';}});
+    // LƯU BÚT RIÊNG TƯ
+  const baseApi = api, baseRender = render, baseStatus = status;
+  const baseRemember = rememberSession, privatePhotos = new Map();
+  let ownerMode = false;
+  const guestSessionKey = SESSION_KEY + '-guest';
+
+  rememberSession = function(s) {
+    if (session?.user?.id !== s?.user?.id) {
+      wishes = []; loaded = false; lastRender = ''; mutation++;
+      privatePhotos.clear(); ownerMode = false;
+      $('wall').replaceChildren(); $('count').textContent = '—';
+      $('empty').hidden = true; $('backup').disabled = true;
+      $('photoDialog').close(); $('largePhoto').removeAttribute('src');
+      pendingSubmission = null; uploaded = null;
+    }
+    baseRemember(s);
+  };
+
+  async function signPhotos(rows, s) {
+    const all = [...wishes, ...rows];
+    const paths = [...new Set(all.map(w => w.photo_path).filter(p =>
+      typeof p === 'string'
+      && /^[0-9a-f-]{36}\/[0-9a-f-]{36}\.jpe?g$/i.test(p)
+      && (!privatePhotos.has(p)
+        || privatePhotos.get(p).until < Date.now() + 60000)
+    ))];
+
+    for (let i = 0; i < paths.length; i += 100) {
+      const result = await baseApi('/storage/v1/object/sign/' + BUCKET, {
+        method: 'POST',
+        token: s.access_token,
+        body: {paths: paths.slice(i, i + 100), expiresIn: 600}
+      });
+
+      if (session?.user?.id !== s.user.id)
+        throw new Error('Phiên đã thay đổi.');
+
+      for (const item of result) {
+        const link = item.signedURL || item.signedUrl;
+        if (!link || item.error)
+          throw new Error('Chưa đọc được ảnh riêng tư.');
+
+        const url = new URL(
+          link.startsWith('/object/') ? '/storage/v1' + link : link,
+          BASE
+        );
+
+        if (url.origin !== BASE
+          || !url.pathname.startsWith('/storage/v1/object/sign/' + BUCKET + '/'))
+          throw new Error('Đường dẫn ảnh không hợp lệ.');
+
+        privatePhotos.set(item.path, {
+          url: url.href,
+          until: Date.now() + 600000
+        });
+      }
+    }
+
+    all.forEach(w =>
+      w._privatePhoto = privatePhotos.get(w.photo_path)?.url || ''
+    );
+  }
+
+  api = async function(path, options = {}) {
+    if (!path.startsWith('/rest/v1/wishes'))
+      return baseApi(path, options);
+
+    if (!session && !signingIn
+      && (!options.method || options.method === 'GET'))
+      return [];
+
+    const s = await getSession();
+    const result = await baseApi(path, {
+      ...options, token: s.access_token
+    });
+
+    if (session?.user?.id !== s.user.id)
+      throw new Error('Phiên đã thay đổi.');
+
+    if (Array.isArray(result)) {
+      if (options.method === 'POST')
+        await signPhotos(result, s).catch(console.warn);
+      else
+        await signPhotos(result, s);
+    }
+
+    if (session?.user?.id !== s.user.id)
+      throw new Error('Phiên đã thay đổi.');
+
+    return result;
+  };
+
+  photoURL = path => privatePhotos.get(path)?.url || '';
+
+  status = (text, failed = false) => baseStatus(
+    failed ? text : ownerMode
+      ? 'Chế độ Linh · Bạn đang xem toàn bộ lời chúc'
+      : 'Lưu bút riêng tư · Bạn chỉ xem được lời chúc của mình',
+    failed
+  );
+
+  const ownerButton = el('button', 'plain-btn', 'Dành cho Linh');
+  document.querySelector('.footer-actions').append(ownerButton);
+
+  render = function() {
+    baseRender();
+
+    document.querySelector('.section-top h2').firstChild.nodeValue =
+      ownerMode ? 'Tất cả lời chúc ' : 'Lời chúc bạn đã gửi ';
+
+    document.querySelector('.section-top p').textContent = ownerMode
+      ? 'Chỉ tài khoản của Linh được xem toàn bộ.'
+      : 'Chỉ bạn và Linh có thể đọc lời chúc, xem ảnh của bạn.';
+
+    ownerButton.textContent =
+      ownerMode ? 'Đăng xuất quản trị' : 'Dành cho Linh';
+
+    if (!wishes.length) {
+      $('emptyTitle').textContent = ownerMode
+        ? 'Chưa có lời chúc nào'
+        : 'Gửi Linh một lời thương nhé';
+
+      $('emptyText').textContent = ownerMode
+        ? 'Lời chúc mới sẽ xuất hiện tại đây.'
+        : 'Lời chúc gửi từ trình duyệt này sẽ hiện ở đây để bạn đọc lại.';
+    }
+  };
+
+  document.querySelector('.form-note').textContent =
+    'Lời chúc và ảnh chỉ dành cho bạn và Linh. Hãy dùng lại trình duyệt này để xem bài đã gửi.';
+
+  document.querySelector('.text-link').textContent =
+    'Xem lời chúc của mình ↓';
+
+  document.querySelector('.navright a').textContent =
+    'Lời chúc của bạn';
+
+  const loginDialog = document.createElement('dialog');
+  loginDialog.innerHTML = `
+    <form id="ownerForm">
+      <h2>Góc riêng của Linh ♡</h2>
+      <p>Đăng nhập để đọc tất cả lời chúc.</p>
+
+      <label for="ownerEmail">Email quản trị</label>
+      <input id="ownerEmail" type="email"
+        autocomplete="username" required
+        style="width:100%;padding:11px;margin-bottom:16px">
+
+      <label for="ownerPassword">Mật khẩu</label>
+      <input id="ownerPassword" type="password"
+        autocomplete="current-password" required
+        style="width:100%;padding:11px;margin-bottom:16px">
+
+      <p id="ownerError" class="error" hidden role="alert"></p>
+
+      <button id="ownerSubmit" class="btn primary" type="submit">
+        Đăng nhập
+      </button>
+      <button id="ownerCancel" class="btn secondary" type="button">
+        Đóng
+      </button>
+    </form>`;
+
+  loginDialog.setAttribute('aria-label', 'Đăng nhập quản trị');
+  document.body.append(loginDialog);
+
+  let loginBusy = false;
+  $('ownerCancel').onclick = () => loginDialog.close();
+
+  loginDialog.addEventListener('close', () =>
+    $('ownerPassword').value = ''
+  );
+
+  loginDialog.addEventListener('cancel', e => {
+    if (loginBusy) e.preventDefault();
+  });
+
+  ownerButton.onclick = async () => {
+    if (sending || exporting) {
+      toast('Bạn chờ thao tác hiện tại hoàn tất nhé.');
+      return;
+    }
+
+    if (!ownerMode) {
+      loginDialog.showModal();
+      return;
+    }
+
+    ownerButton.disabled = true;
+    try {
+      if (session) {
+        await baseApi('/auth/v1/logout?scope=local', {
+          method: 'POST',
+          token: session.access_token
+        }).catch(() => {});
+      }
+
+      let guest = null;
+      try {
+        guest = JSON.parse(
+          localStorage.getItem(guestSessionKey) || 'null'
+        );
+        localStorage.removeItem(guestSessionKey);
+      } catch {}
+
+      rememberSession(guest);
+      location.reload();
+    } finally {
+      ownerButton.disabled = false;
+    }
+  };
+
+  $('ownerForm').onsubmit = async e => {
+    e.preventDefault();
+    if (loginBusy) return;
+
+    loginBusy = true;
+    $('ownerSubmit').disabled = true;
+    $('ownerCancel').disabled = true;
+    $('ownerError').hidden = true;
+
+    try {
+      const s = await baseApi('/auth/v1/token?grant_type=password', {
+        method: 'POST',
+        body: {
+          email: $('ownerEmail').value.trim(),
+          password: $('ownerPassword').value
+        }
+      });
+
+      const allowed = await baseApi('/rest/v1/rpc/is_guestbook_owner', {
+        method: 'POST',
+        token: s.access_token,
+        body: {}
+      });
+
+      if (allowed !== true)
+        throw new Error('Tài khoản này chưa được cấp quyền quản trị.');
+
+      if (session?.user?.is_anonymous) {
+        try {
+          localStorage.setItem(guestSessionKey, JSON.stringify(session));
+        } catch {}
+      }
+
+      s.expires_at = s.expires_at || Date.now()/1000 + s.expires_in;
+      rememberSession(s);
+      $('ownerPassword').value = '';
+      location.reload();
+    } catch {
+      $('ownerError').textContent =
+        'Chưa đăng nhập được. Kiểm tra email, mật khẩu và UID quản trị trong Supabase.';
+      $('ownerError').hidden = false;
+    } finally {
+      loginBusy = false;
+      $('ownerSubmit').disabled = false;
+      $('ownerCancel').disabled = false;
+    }
+  };
+
+  window.addEventListener('storage', e => {
+    if (e.key === SESSION_KEY) location.reload();
+  });
+
+  window.addEventListener('pageshow', e => {
+    if (e.persisted) location.reload();
+  });
+
+  if (session) {
+    getSession().then(async s => {
+      const allowed = await baseApi('/rest/v1/rpc/is_guestbook_owner', {
+        method: 'POST', token: s.access_token, body: {}
+      });
+
+      if (session?.user?.id === s.user.id) {
+        ownerMode = allowed === true;
+        render();
+        status('');
+      }
+    }).catch(console.warn);
+  }
   sync(true);
 })();
 </script>
