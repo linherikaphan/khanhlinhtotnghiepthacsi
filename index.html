@@ -534,6 +534,7 @@ dialog{border:1px solid #d6e7f2;border-radius:24px;padding:0;width:min(510px,cal
       }
     }).catch(console.warn);
   }
+const cardBeforeDelete=makeCard;makeCard=w=>{const c=cardBeforeDelete(w),b=el('button','plain-btn admin-delete','Xóa lời chúc');b.hidden=!ownerMode;b.onclick=async()=>{if(!ownerMode||sending||exporting||!confirm('Xóa vĩnh viễn lời chúc này?'))return;b.disabled=true;try{const s=await getSession(),r=await baseApi('/rest/v1/wishes?id=eq.'+encodeURIComponent(w.id),{method:'DELETE',token:s.access_token,headers:{Prefer:'return=representation'}});if(!r?.length){toast('Bài đã bị xóa hoặc tài khoản chưa có quyền xóa.');return;}if(syncing)await syncing;mutation++;wishes=wishes.filter(x=>x.id!==w.id);render();toast('Đã xóa lời chúc.');}catch(e){toast(friendly(e));}finally{b.disabled=false;}};c.append(b);return c;};const renderBeforeDelete=render;render=()=>{renderBeforeDelete();document.querySelectorAll('.admin-delete').forEach(b=>b.hidden=!ownerMode);};const syncBeforeDelete=sync;sync=()=>syncBeforeDelete(true);
   sync(true);
 })();
 </script>
